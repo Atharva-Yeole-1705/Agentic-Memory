@@ -13,7 +13,14 @@ from .services import EmbeddingRateLimitError, GroqBudgetExceededError, SYSTEM_P
 
 settings = get_settings()
 app = FastAPI(title="Agentic Memory API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=[settings.allowed_origin], allow_methods=["*"], allow_headers=["*"])
+cors_origins = [origin.strip() for origin in settings.allowed_origin.split(",") if origin.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/api/health")
