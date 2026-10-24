@@ -27,9 +27,9 @@ This project is a coding assistant with a Python CLI and a React + Vite web inte
 - MongoDB defaults to `mongodb://localhost:27017`, database `agentic_memory`, collection `memories`.
 - Each memory's **content only** is sent to Voyage with `input_type="document"`; multiple memories are batched per request to reduce rate-limit pressure. Its type is stored as MongoDB metadata and is not included in the embedding text. The Voyage client retries transient rate-limit errors.
 - Stored fields include `type`, `content`, `embedding`, `source` session ID, `created_at`, `updated_at`, `expires_at`, and a content-derived `memory_key`.
-- A TTL index on `expires_at` expires memories after `MEMORY_TTL_DAYS` (365 days by default). MongoDB's TTL cleanup is asynchronous.
-- For each new prompt, the app embeds it with `input_type="query"` and uses MongoDB's `$vectorSearch` aggregation stage to retrieve up to the top 8 active memories for both agents. There is no Python similarity-ranking fallback.
-- `memory_store.py` creates a vector search index on `embedding` plus a filter index on `expires_at`, and waits for it to become queryable. `VOYAGE_DIMENSIONS` defaults to 1024 and must match the stored embeddings.
+- TTL by memory type: `project_fact` 365 days; `technical_decision`, `business_rule`, `ongoing_goal` 180 days; `user_preference`, `lesson_learned`, `project_milestone` 30 days. Expiry refreshes on each save; MongoDB's TTL cleanup is asynchronous. Existing records are migrated once from `updated_at` (or `created_at`).
+- For each new prompt, the app embeds it with `input_type="query"` and uses MongoDB's `$vectorSearch` aggregation stage to retrieve up to the top 8 active memories for both agents. UI filters support selected conversation sources, memory types, and creation-date recency (1, 7, 14, 30, custom days, or forever). Defaults are all conversations, all types, and forever. There is no Python similarity-ranking fallback.
+- `memory_store.py` creates a vector search index on `embedding` plus filter fields on `expires_at`, `source`, `type`, and `created_at`, and waits for those active fields to become queryable. `VOYAGE_DIMENSIONS` defaults to 1024 and must match the stored embeddings.
 - The app's `.env` points to MongoDB Atlas (never copy its credential into docs). MongoDB Vector Search requires a compatible deployment; self-managed `mongot` requires a replica set. Native Windows `mongot` is unavailable, so local Windows development should use Docker-based MongoDB Atlas Local. The separately running local service was observed as standalone MongoDB 8.2.1 with no `mongot`; it cannot serve native vector search.
 - The summariser updates the retrieved subset. Its returned records are upserted; retrieved records it omits are deleted. Records outside the retrieved subset remain stored.
 - `memory.txt` and its legacy fallback have been removed. MongoDB is the only long-term memory store.
@@ -55,7 +55,6 @@ Set these values in `.env`; use `.env.example` as a template. Keep actual keys p
 - `VOYAGE_MODEL` - defaults to `voyage-4-lite`.
 - `MONGODB_URI` - configured in the ignored local `.env`; do not copy credentials into source files or documentation.
 - `MONGODB_DATABASE` - defaults to `agentic_memory`.
-- `MEMORY_TTL_DAYS` - defaults to `365` and must be at least 1.
 - `VOYAGE_DIMENSIONS` - defaults to `1024`, matching `voyage-4-lite`'s default output dimension.
 
 ## Running Locally

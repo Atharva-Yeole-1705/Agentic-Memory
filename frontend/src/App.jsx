@@ -95,6 +95,59 @@ function Message({ message }) {
   );
 }
 
+function MultiSelectFilter({ title, allLabel, options, selected, onChange }) {
+  const allSelected = selected.length === 0 || selected.length === options.length;
+  const selectedOptions = options.filter((option) => selected.includes(option.value));
+  const valueLabel = allSelected
+    ? allLabel
+    : selectedOptions.length === 1
+      ? selectedOptions[0].label
+      : `${selectedOptions.length} selected`;
+
+  function toggle(value) {
+    const next = selected.includes(value)
+      ? selected.filter((item) => item !== value)
+      : [...selected, value];
+    onChange(next.length === options.length ? [] : next);
+  }
+
+  return (
+    <details className={`filter-dropdown filter-${title.toLowerCase()}`}>
+      <summary>
+        <span className="filter-name">{title}</span>
+        <span className="filter-value" title={valueLabel}>{valueLabel}</span>
+        <Icon name="chevron" size={13} />
+      </summary>
+      <div className="filter-menu">
+        <button
+          type="button"
+          className={`filter-option filter-all-option ${allSelected ? "filter-option-selected" : ""}`}
+          aria-pressed={allSelected}
+          onClick={() => onChange([])}
+        >
+          <span className="filter-checkmark">{allSelected && <Icon name="check" size={12} />}</span>
+          <span>{allLabel}</span>
+        </button>
+        <div className="filter-divider" />
+        {options.map((option) => (
+          <label className="filter-option" key={option.value}>
+            <input
+              type="checkbox"
+              checked={selected.includes(option.value)}
+              onChange={() => toggle(option.value)}
+            />
+            <span className="filter-option-copy">
+              <span>{option.label}</span>
+              {option.detail && <small>{option.detail}</small>}
+            </span>
+          </label>
+        ))}
+        {!options.length && <span className="filter-empty">No options available</span>}
+      </div>
+    </details>
+  );
+}
+
 function MemoryUpdate({ output }) {
   let memories = [];
   try { memories = JSON.parse(output).memories || []; } catch { /* Keep invalid output readable below. */ }
@@ -115,12 +168,18 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState(null);
   const [memoryOutput, setMemoryOutput] = useState(null);
+  const [selectedSources, setSelectedSources] = useState([]);
+  const [selectedTypes, setSelectedTypes] = useState([]);
+  const [recencyPreset, setRecencyPreset] = useState("forever");
+  const [customDays, setCustomDays] = useState("30");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
   const textareaRef = useRef(null);
   const bottomRef = useRef(null);
+  const invalidCustomDays = recencyPreset === "custom"
+    && (!/^\d+$/.test(customDays) || Number(customDays) < 1);
 
   useEffect(() => {
     let mounted = true;
@@ -201,7 +260,7 @@ export default function App() {
 
   async function sendMessage(value = draft) {
     const content = value.trim();
-    if (!content || busy || !activeId) return;
+    if (!content || busy || !activeId || invalidCustomDays) return;
     const previous = messages;
     setMessages([...previous, { role: "user", content }]);
     setDraft("");
@@ -212,7 +271,16 @@ export default function App() {
     try {
       const result = await api(`/sessions/${activeId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({
+          content,
+          memory_filters: {
+            sources: selectedSources,
+            types: selectedTypes,
+            recency_days: recencyPreset === "forever"
+              ? null
+              : recencyPreset === "custom" ? Number(customDays) : Number(recencyPreset),
+          },
+        }),
       });
       setMessages(result.messages || []);
       setMemoryOutput(result.summarizer_output);
@@ -236,6 +304,15 @@ export default function App() {
   }
 
   const hasMessages = messages.length > 0;
+  const sourceOptions = sessions.map((session) => ({
+    value: session.id,
+    label: session.title || "New conversation",
+    detail: session.id,
+  }));
+  const typeOptions = (status?.memory_types || []).map((type) => ({
+    value: type,
+    label: type.replaceAll("_", " "),
+  }));
 
   return (
     <div className="app-shell">
@@ -260,6 +337,49 @@ export default function App() {
             <div className="top-avatar">A</div>
           </div>
         </header>
+
+        <div className="filter-toolbar" aria-label="Memory retrieval filters">
+          <span className="filter-toolbar-title">Memory filters</span>
+          <MultiSelectFilter
+            title="Source"
+            allLabel="All conversations"
+            options={sourceOptions}
+            selected={selectedSources}
+            onChange={setSelectedSources}
+          />
+          <MultiSelectFilter
+            title="Type"
+            allLabel="All types"
+            options={typeOptions}
+            selected={selectedTypes}
+            onChange={setSelectedTypes}
+          />
+          <label className="recency-filter">
+            <span>Recency</span>
+            <select value={recencyPreset} onChange={(event) => setRecencyPreset(event.target.value)}>
+              <option value="forever">Forever</option>
+              <option value="1">Past day</option>
+              <option value="7">Past 7 days</option>
+              <option value="14">Past 14 days</option>
+              <option value="30">Past 30 days</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          {recencyPreset === "custom" && (
+            <label className="custom-days-filter">
+              <span>Days</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={customDays}
+                onChange={(event) => setCustomDays(event.target.value)}
+                aria-label="Custom recency in days"
+              />
+            </label>
+          )}
+          <span className="filter-hint">Applied to the next message</span>
+        </div>
 
         <section className={`chat-scroll ${hasMessages ? "chat-scroll-filled" : ""}`}>
           <div className="conversation">
@@ -303,7 +423,7 @@ export default function App() {
               disabled={loading || busy || !activeId}
               aria-label="Message the coding assistant"
             />
-            <div className="composer-tools"><span className="composer-hint"><Icon name="spark" size={14} /> Memory-aware responses <i>&middot;</i> <kbd>Enter</kbd> to send</span><button type="submit" className="send-button" disabled={!draft.trim() || busy || loading}><Icon name="send" size={17} /></button></div>
+            <div className="composer-tools"><span className="composer-hint"><Icon name="spark" size={14} /> Memory-aware responses <i>&middot;</i> <kbd>Enter</kbd> to send</span><button type="submit" className="send-button" disabled={!draft.trim() || busy || loading || invalidCustomDays}><Icon name="send" size={17} /></button></div>
           </form>
           <p className="disclaimer">Recall can make mistakes. Review generated code before using it.</p>
         </footer>

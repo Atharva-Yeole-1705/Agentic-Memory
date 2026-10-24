@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
-from memory_store import MemoryStore
+from memory_store import MEMORY_TTL_DAYS_BY_TYPE, MemoryStore
 
 BASE_DIR = Path(__file__).parent
 SESSIONS_DIR = BASE_DIR / "sessions"
@@ -191,10 +191,7 @@ Output requirements:
 9. Ensure the output is valid JSON that can be parsed programmatically.
 10. Do not create embeddings; the application embeds each memory's content separately."""
 
-MEMORY_TYPES = {
-    "project_fact", "technical_decision", "business_rule", "user_preference",
-    "lesson_learned", "ongoing_goal", "project_milestone",
-}
+MEMORY_TYPES = set(MEMORY_TTL_DAYS_BY_TYPE)
 
 
 def parse_memories(raw):
@@ -311,15 +308,11 @@ def main():
         raise SystemExit("Set VOYAGE_API_KEY in the .env file before starting.")
 
     SESSIONS_DIR.mkdir(exist_ok=True)
-    ttl_days = int(os.getenv("MEMORY_TTL_DAYS", "365"))
-    if ttl_days < 1:
-        raise SystemExit("MEMORY_TTL_DAYS must be at least 1.")
     memory_store = MemoryStore(
         os.getenv("MONGODB_URI", "mongodb://localhost:27017"),
         os.getenv("MONGODB_DATABASE", "agentic_memory"),
         voyage_key,
         os.getenv("VOYAGE_MODEL", "voyage-4-lite"),
-        ttl_days,
         int(os.getenv("VOYAGE_DIMENSIONS", "1024")),
     )
     summarizer_only = os.getenv("SUMMARIZER_ONLY", "false").lower() in {"1", "true", "yes"}

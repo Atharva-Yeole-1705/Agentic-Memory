@@ -143,9 +143,19 @@ At startup, `MemoryStore` pings MongoDB and creates:
 
 - A TTL index on `expires_at` with `expireAfterSeconds=0`.
 - A unique index on `memory_key`.
-- A MongoDB Vector Search index on `embedding` using cosine similarity, with `expires_at` indexed as a filter field.
+- A MongoDB Vector Search index on `embedding` using cosine similarity, with `expires_at`, `source`, `type`, and `created_at` indexed as filter fields.
 
-The app waits for the vector index to become queryable before starting. The MongoDB TTL monitor removes expired records asynchronously. The app pre-filters records with `expires_at` greater than the current UTC time during retrieval.
+The app waits for the updated vector index definition to be active on all search nodes before starting. The MongoDB TTL monitor removes expired records asynchronously. Retrieval always filters out expired records and can additionally pre-filter by selected source sessions, memory types, and creation date.
+
+Memory retention is set by type and refreshed on each successful save:
+
+| Memory type | TTL |
+| --- | ---: |
+| `project_fact` | 365 days |
+| `technical_decision`, `business_rule`, `ongoing_goal` | 180 days |
+| `user_preference`, `lesson_learned`, `project_milestone` | 30 days |
+
+On the first startup after this policy is introduced, existing records have `expires_at` recalculated from `updated_at`, falling back to `created_at`. A `ttl_policy_version` field prevents this migration from running again on later startups. Expired records are then removed asynchronously by MongoDB's TTL monitor.
 
 ### Memory document
 
@@ -160,13 +170,14 @@ A stored document has this conceptual shape:
   "source": "session_id",
   "created_at": "UTC timestamp",
   "updated_at": "UTC timestamp",
-  "expires_at": "UTC timestamp"
+  "expires_at": "UTC timestamp",
+  "ttl_policy_version": 1
 }
 ```
 
 The vector shown is abbreviated. `memory_key` is the SHA-256 hash of the JSON-encoded pair `[type, content]`. The `source` is set when the record is first inserted; subsequent updates refresh `updated_at` and `expires_at` but do not change `source` or `created_at`.
 
-Each returned memory's `content` is an independent input in a batched Voyage request; `type` remains MongoDB metadata and is not included in the embedding text. The Voyage client retries transient rate-limit errors. The configured output dimension must match the vector index dimension. The configured TTL is counted from each successful upsert, so retaining/updating a memory refreshes its expiry.
+Each returned memory's `content` is an independent input in a batched Voyage request; `type` remains MongoDB metadata and is not included in the embedding text. The Voyage client retries transient rate-limit errors. The configured output dimension must match the vector index dimension. Each upsert refreshes expiry using the TTL for that memory's type.
 
 ## 7. Vector Retrieval
 
@@ -174,8 +185,10 @@ Retrieval is performed by MongoDB Vector Search. Python creates the query vector
 
 1. Voyage embeds the current user prompt with `input_type="query"` and `output_dimension=VOYAGE_DIMENSIONS`.
 2. MongoDB compares the query vector with the indexed `embedding` field using cosine similarity.
-3. `$vectorSearch.filter` excludes expired records using the indexed `expires_at` field.
+3. `$vectorSearch.filter` always excludes expired records using `expires_at` and optionally filters by selected `source`, `type`, and `created_at` date range. The recency window is measured from the memory's original creation date, not from later refreshes.
 4. The stage returns up to eight matches. The app requests at least 20 candidates per result (`numCandidates=max(100, limit * 20)`) to improve approximate-nearest-neighbor recall.
+
+The web UI offers multi-select dropdowns for conversations and the seven permitted memory types. Its recency dropdown provides forever (the default), 1, 7, 14, and 30 days, plus a custom number of days. An empty source or type selection means all. The selected records are shared by the coding assistant and summariser; records outside the retrieved subset remain untouched when memories are updated.
 
 The same selected records are used by the coding assistant and summariser. The coding assistant receives text formatted as `- [type] content`. The summariser receives JSON containing the selected records' `type` and `content` fields. Python does not scan or rank the stored embeddings; the database's `$vectorSearch` stage performs retrieval.
 
@@ -197,6 +210,18 @@ For Atlas Free M0, if index creation from PyMongo is unavailable, create a Vecto
     {
       "type": "filter",
       "path": "expires_at"
+    },
+    {
+      "type": "filter",
+      "path": "source"
+    },
+    {
+      "type": "filter",
+      "path": "type"
+    },
+    {
+      "type": "filter",
+      "path": "created_at"
     }
   ]
 }
@@ -219,11 +244,11 @@ The React + Vite development server runs on port `5173` by default and proxies `
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/status` | Reports whether summariser-only mode is active. |
+| `GET` | `/api/status` | Reports summariser-only mode and the permitted memory types. |
 | `GET` | `/api/sessions` | Lists saved sessions, titles, and message counts. |
 | `POST` | `/api/sessions` | Creates a new session. |
 | `GET` | `/api/sessions/{session_id}` | Loads a session and its messages. |
-| `POST` | `/api/sessions/{session_id}/messages` | Retrieves memory, calls the configured agents, and persists the turn. |
+| `POST` | `/api/sessions/{session_id}/messages` | Retrieves filtered memory, calls the configured agents, and persists the turn. Accepts optional `memory_filters` with `sources`, `types`, and `recency_days`; empty source/type lists and `null` recency mean all/forever. |
 
 The message endpoint accepts `{"content":"user prompt"}`. Its response includes `assistant_reply` (or `null` in summariser-only mode), `summarizer_output` (the raw JSON text or `null`), `memory_error` (or `null`), the saved `messages`, and a `summarizer_only` flag. A coding model failure returns HTTP 502. A summariser or memory-save failure is reported in `memory_error` so an already-generated coding reply can still be returned.
 
@@ -249,7 +274,6 @@ Configuration is read from `.env` by both the CLI and web API. `.env` is ignored
 | `VOYAGE_DIMENSIONS` | `1024` | Embedding output dimension and MongoDB vector index dimension. |
 | `MONGODB_URI` | unset (code fallback: `mongodb://localhost:27017`) | MongoDB connection string. Use a compatible Atlas cluster for hosted Vector Search. |
 | `MONGODB_DATABASE` | `agentic_memory` | Database name. |
-| `MEMORY_TTL_DAYS` | `365` | Memory lifetime; must be at least one day. |
 
 Python dependencies are declared in `requirements.txt`. The frontend uses React, React DOM, React Markdown, Remark GFM, Vite, and the Vite React plugin; versions are declared in `frontend/package.json`.
 

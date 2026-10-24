@@ -7,11 +7,22 @@ import voyageai
 from pymongo import MongoClient
 from pymongo.operations import SearchIndexModel
 
+MEMORY_TTL_DAYS_BY_TYPE = {
+    "project_fact": 365,
+    "technical_decision": 180,
+    "business_rule": 180,
+    "ongoing_goal": 180,
+    "user_preference": 30,
+    "lesson_learned": 30,
+    "project_milestone": 30,
+}
+MEMORY_TTL_POLICY_VERSION = 1
+
 
 class MemoryStore:
     """Persist typed memories and their Voyage embeddings in local MongoDB."""
 
-    def __init__(self, uri, database, voyage_key, voyage_model, ttl_days, vector_dimensions=1024):
+    def __init__(self, uri, database, voyage_key, voyage_model, vector_dimensions=1024):
         self.client = MongoClient(uri, serverSelectionTimeoutMS=5000, tz_aware=True)
         self.client.admin.command("ping")
         topology = self.client.admin.command("hello")
@@ -24,15 +35,44 @@ class MemoryStore:
         self.collection = self.client[database]["memories"]
         self.collection.create_index("expires_at", expireAfterSeconds=0, name="memory_ttl")
         self.collection.create_index("memory_key", unique=True, name="memory_key_unique")
+        self._apply_ttl_policy()
         # Retry transient rate-limit responses, which are common on Voyage's free tier.
         self.voyage = voyageai.Client(api_key=voyage_key, max_retries=8)
         self.voyage_model = voyage_model
         self.vector_dimensions = vector_dimensions
-        self.ttl = timedelta(days=ttl_days)
         self._ensure_vector_index()
+
+    def _apply_ttl_policy(self):
+        """Recalculate legacy expiries once using each memory's last saved time."""
+        branches = [
+            {"case": {"$eq": ["$type", memory_type]}, "then": days}
+            for memory_type, days in MEMORY_TTL_DAYS_BY_TYPE.items()
+        ]
+        self.collection.update_many(
+            {
+                "ttl_policy_version": {"$ne": MEMORY_TTL_POLICY_VERSION},
+                "type": {"$in": list(MEMORY_TTL_DAYS_BY_TYPE)},
+            },
+            [{"$set": {
+                "expires_at": {
+                    "$dateAdd": {
+                        "startDate": {
+                            "$ifNull": [
+                                "$updated_at",
+                                {"$ifNull": ["$created_at", "$$NOW"]},
+                            ]
+                        },
+                        "unit": "day",
+                        "amount": {"$switch": {"branches": branches, "default": 30}},
+                    }
+                },
+                "ttl_policy_version": MEMORY_TTL_POLICY_VERSION,
+            }}],
+        )
 
     def _ensure_vector_index(self):
         """Create/update the Vector Search index and wait until it is queryable."""
+        filter_paths = ("expires_at", "source", "type", "created_at")
         vector_field = {
             "type": "vector",
             "path": "embedding",
@@ -40,7 +80,9 @@ class MemoryStore:
             "similarity": "cosine",
         }
         definition = {
-            "fields": [vector_field, {"type": "filter", "path": "expires_at"}]
+            "fields": [vector_field] + [
+                {"type": "filter", "path": path} for path in filter_paths
+            ]
         }
         model = SearchIndexModel(
             definition=definition,
@@ -57,10 +99,9 @@ class MemoryStore:
             return (
                 vector is not None
                 and all(vector.get(key) == value for key, value in vector_field.items())
-                and any(
-                    field.get("type") == "filter" and field.get("path") == "expires_at"
-                    for field in fields
-                )
+                and set(filter_paths).issubset({
+                    field.get("path") for field in fields if field.get("type") == "filter"
+                })
             )
 
         try:
@@ -73,7 +114,7 @@ class MemoryStore:
             if current is None:
                 self.collection.create_search_index(model=model)
             else:
-                # Keep Atlas's existing filter fields, adding only the expiry filter we need.
+                # Keep Atlas's existing fields and add any required retrieval filters.
                 current_definition = current.get("latestDefinition", {})
                 fields = list(current_definition.get("fields", []))
                 existing_vector = next(
@@ -91,11 +132,12 @@ class MemoryStore:
                         f"dimension ({self.vector_dimensions}) and cosine similarity."
                     )
 
-                if not any(
-                    field.get("type") == "filter" and field.get("path") == "expires_at"
-                    for field in fields
-                ):
-                    fields.append({"type": "filter", "path": "expires_at"})
+                indexed_filters = {
+                    field.get("path") for field in fields if field.get("type") == "filter"
+                }
+                missing_filters = [path for path in filter_paths if path not in indexed_filters]
+                if missing_filters:
+                    fields.extend({"type": "filter", "path": path} for path in missing_filters)
                     self.collection.update_search_index(
                         "memory_vector_index",
                         {**current_definition, "fields": fields},
@@ -135,8 +177,10 @@ class MemoryStore:
                 "with its mongot search process running; no Python search fallback is used."
             ) from error
 
-    def relevant_memories(self, query, limit=8):
-        """Return the top active memories using MongoDB's vector search stage."""
+    def relevant_memories(
+        self, query, limit=8, sources=None, types=None, recency_days=None
+    ):
+        """Return active memories using MongoDB vector search and indexed filters."""
         now = datetime.now(timezone.utc)
         query_vector = self.voyage.embed(
             [query],
@@ -144,6 +188,15 @@ class MemoryStore:
             input_type="query",
             output_dimension=self.vector_dimensions,
         ).embeddings[0]
+        filters = [{"expires_at": {"$gt": now}}]
+        if sources:
+            filters.append({"source": {"$in": sources}})
+        if types:
+            filters.append({"type": {"$in": types}})
+        if recency_days is not None:
+            filters.append({"created_at": {"$gte": now - timedelta(days=recency_days)}})
+        pre_filter = filters[0] if len(filters) == 1 else {"$and": filters}
+
         return list(self.collection.aggregate([
             {
                 "$vectorSearch": {
@@ -152,7 +205,7 @@ class MemoryStore:
                     "queryVector": query_vector,
                     "numCandidates": max(100, limit * 20),
                     "limit": limit,
-                    "filter": {"expires_at": {"$gt": now}},
+                    "filter": pre_filter,
                 }
             },
             {"$project": {"_id": 0, "memory_key": 1, "type": 1, "content": 1}},
@@ -165,6 +218,8 @@ class MemoryStore:
         items = []
 
         for item in memories:
+            if item["type"] not in MEMORY_TTL_DAYS_BY_TYPE:
+                raise ValueError(f"Unsupported memory type: {item['type']}")
             memory_key = hashlib.sha256(
                 json.dumps([item["type"], item["content"]], ensure_ascii=False).encode("utf-8")
             ).hexdigest()
@@ -193,7 +248,10 @@ class MemoryStore:
                     "$set": {
                         "embedding": vector,
                         "updated_at": now,
-                        "expires_at": now + self.ttl,
+                        "expires_at": now + timedelta(
+                            days=MEMORY_TTL_DAYS_BY_TYPE[item["type"]]
+                        ),
+                        "ttl_policy_version": MEMORY_TTL_POLICY_VERSION,
                     },
                     "$setOnInsert": {
                         "memory_key": memory_key,
