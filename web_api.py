@@ -43,6 +43,7 @@ async def lifespan(app):
         voyage_key,
         os.getenv("VOYAGE_MODEL", "voyage-4-lite"),
         ttl_days,
+        int(os.getenv("VOYAGE_DIMENSIONS", "1024")),
     )
     app.state.summarizer_only = os.getenv("SUMMARIZER_ONLY", "false").lower() in {
         "1", "true", "yes"

@@ -320,6 +320,7 @@ def main():
         voyage_key,
         os.getenv("VOYAGE_MODEL", "voyage-4-lite"),
         ttl_days,
+        int(os.getenv("VOYAGE_DIMENSIONS", "1024")),
     )
     summarizer_only = os.getenv("SUMMARIZER_ONLY", "false").lower() in {"1", "true", "yes"}
     model = None if summarizer_only else ChatGroq(
