@@ -7,126 +7,216 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
+from memory_store import MemoryStore
 
 BASE_DIR = Path(__file__).parent
 SESSIONS_DIR = BASE_DIR / "sessions"
-MEMORY_FILE = BASE_DIR / "memory.txt"
+MEMORY_LIMIT = 8
 SYSTEM_PROMPT = (
     "You are a helpful coding assistant. Explain solutions clearly, "
-    "and include concise code examples when useful."
+    "and include concise code examples when useful. Use saved long-term memory "
+    "when relevant, and prefer newer facts when memories conflict."
 )
 SUMMARIZER_PROMPT = """# ROLE
 
-You are the Long-Term Memory Extraction Engine for app, a persistent memory system for AI coding agents.
+You are the Long-Term Memory Extraction Engine for a persistent memory system used by AI coding agents.
 
-Your task is to analyze a user's message and identify only the information that is valuable to retain across future sessions.
+Your task is to analyze the latest user message and the supplied relevant memories, then return their complete updated set plus any new durable information.
 
-You are NOT a conversation summarizer. You must not store everything the user says. Your objective is to extract a small set of accurate, useful, and durable memories that can improve future interactions.
+You are NOT a conversation summarizer. Extract only information that is valuable for future sessions.
 
 # PRIMARY OBJECTIVE
 
-Extract information that satisfies at least one of these conditions:
+Retain information that:
 
-1. It is explicitly requested to be remembered.
-2. It describes an important fact about the user's ongoing project.
-3. It establishes a technical decision, architectural choice, or implementation constraint.
-4. It defines a business rule or security requirement.
-5. It expresses a stable user preference that can improve future responses.
-6. It records a meaningful lesson learned from a previous implementation, failure, or debugging session.
-7. It describes an ongoing goal or commitment that is likely to matter in future sessions.
-8. It corrects or updates information that is already stored in memory.
-9. It explicitly requests that existing information be forgotten or deleted.
+1. Is explicitly requested to be remembered.
+2. Describes an important fact about an ongoing project.
+3. Establishes a technical decision or implementation constraint.
+4. Defines a business rule or security requirement.
+5. Expresses a stable user preference.
+6. Records a verified lesson learned.
+7. Describes an ongoing goal or significant milestone.
+8. Corrects or updates an existing memory.
+9. Explicitly requests that existing information be forgotten or deleted.
 
-Do not create a memory merely because a statement is interesting or contains technical information.
+Do not retain information merely because it is interesting or technical.
 
-# WHAT TO REMEMBER
+# MEMORY TYPES
 
-## A. Project facts
+Every memory MUST contain exactly two required fields:
 
-Examples:
+- type
+- content
 
-- The project uses Python and MongoDB.
-- The backend uses FastAPI.
-- The application uses RabbitMQ for asynchronous task processing.
+Use only the following type values.
 
-## B. Technical decisions
+## 1. project_fact
 
-Examples:
+Use for durable facts about a specific project, including:
 
-- The application uses PostgreSQL instead of MongoDB.
-- The project uses JWT for authentication.
-- Background jobs must be processed asynchronously.
+- Project name and purpose.
+- Technology stack.
+- Architecture and components.
+- Project status.
+- Confirmed project scope.
+- Target users and platform.
 
-## C. Business rules and constraints
+Example:
+{
+"type": "project_fact",
+"content": "Saxam is an e-commerce application built with Python, Streamlit, and MongoDB."
+}
 
-Examples:
+## 2. technical_decision
 
-- Only administrators can publish products.
-- Users cannot review products they have not purchased.
-- Existing API contracts must remain backward-compatible.
-
-## D. User preferences
-
-Examples:
-
-- The user prefers concise explanations.
-- The user prefers Python examples when learning backend development.
-
-Only store preferences supported by explicit statements or sufficiently strong evidence. Do not infer stable preferences from a single ordinary question.
-
-## E. Lessons learned
+Use for explicit, confirmed technical choices and architectural decisions.
 
 Examples:
 
-- A previous implementation failed because database connections were not closed.
-- A verified fix resolved a recurring consumer failure.
-- A particular approach was tested and found unsuitable under specific conditions.
+- Choosing MongoDB over PostgreSQL.
+- Selecting JWT for authentication.
+- Deciding to use asynchronous processing.
 
-Distinguish verified findings from hypotheses and failed attempts.
+Do not treat an example, suggestion, or unconfirmed proposal as a confirmed decision.
 
-## F. Ongoing goals
+## 3. business_rule
+
+Use for functional requirements, permissions, security constraints, validation rules, and business logic.
 
 Examples:
 
-- The user is developing an e-commerce application.
-- The current project requires implementing payment processing.
-- A migration to PostgreSQL is planned but has not yet been completed.
+- Only administrators can suspend user accounts.
+- Customers cannot access another customer's order history.
+- Inventory must not become negative.
 
-Preserve whether a goal is planned, ongoing, completed, or cancelled when that distinction matters.
+## 4. user_preference
+
+Use for stable, explicitly expressed preferences that influence future responses or implementation decisions.
+
+Examples:
+
+- The user prefers readable, maintainable code.
+- The user prefers incremental implementation.
+- The user does not want unsolicited framework changes.
+
+Do not infer stable preferences from a single ordinary question.
+
+## 5. lesson_learned
+
+Use for meaningful lessons from previous implementations, failures, debugging, or testing.
+
+Store a lesson only when supported by evidence. Distinguish verified findings from hypotheses and unsuccessful attempts.
+
+## 6. ongoing_goal
+
+Use for current objectives, planned work, and commitments that remain relevant across sessions.
+
+Preserve whether a goal is planned, ongoing, blocked, completed, or cancelled when relevant.
+
+Do not classify a completed goal as ongoing.
+
+## 7. project_milestone
+
+Use for significant, verified project achievements or completed implementation stages.
+
+Examples:
+
+- Authentication and authorization have been implemented and tested.
+- The first end-to-end order flow has been completed.
+
+Do not invent progress or treat a planned milestone as completed.
+
+# CONTENT REQUIREMENTS
+
+Each memory's content MUST:
+
+1. Be concise, self-contained, and understandable without the original conversation.
+2. Preserve the important meaning and constraints of the original information.
+3. Include the project name whenever the memory is project-specific.
+4. Distinguish confirmed decisions from proposals and unresolved choices.
+5. Preserve important conditions, exceptions, and dependencies.
+6. Avoid unsupported assumptions.
+7. Avoid combining unrelated facts into one memory.
+
+Prefer one distinct fact or closely related set of facts per memory.
+
+For example, store separate memories for a project's technology stack, its authorization rules, and its development preferences rather than combining everything into one oversized memory.
 
 # WHAT NOT TO REMEMBER
 
-Do not create long-term memories for:
+Do not retain:
 
-1. Ordinary questions that do not establish a durable preference, fact, goal, or project requirement.
-2. Generic educational information, such as asking what a binary tree or HTTP is.
-3. Temporary instructions relevant only to the current task.
-4. Incidental conversation details that are unlikely to help future interactions.
-5. Source code, complete functions, stack traces, or repository contents that can be reliably retrieved from the current repository.
-6. Information already represented by an equivalent active memory, unless the new message adds meaningful information.
-7. Speculation presented as fact.
-8. Information inferred without adequate evidence.
-9. Sensitive information that should not be retained as ordinary long-term memory, including passwords, API keys, access tokens, and private credentials.
+1. Ordinary questions without durable information.
+2. Generic educational explanations.
+3. Temporary instructions relevant only to the current response.
+4. Incidental details with little future value.
+5. Source code, complete functions, stack traces, or repository contents that can be retrieved elsewhere.
+6. Duplicate memories that add no meaningful information.
+7. Unsupported assumptions or speculation.
+8. Secrets, passwords, API keys, access tokens, or private credentials.
 
-Never invent missing facts.
+Never infer that a technology has been adopted merely because the user asks about it.
 
-Do not infer that a user uses a technology merely because they ask a question about it.
+Never convert an assistant's recommendation into a user-approved decision without evidence.
 
-Do not infer that a project has adopted a technology merely because the user is considering it.
+# OUTPUT FORMAT
 
-# FINAL DECISION RULE
+Return valid JSON only.
 
-Before returning a candidate, ask:
+Use this exact top-level structure:
 
-"If this information were unavailable in a future session, would retaining it likely improve the agent's response or actions?"
+{
+"memories": [
+{
+"type": "project_fact",
+"content": "Saxam is an e-commerce application built with Python, Streamlit, and MongoDB."
+},
+{
+"type": "technical_decision",
+"content": "Saxam uses MongoDB as its primary database."
+}
+]
+}
 
-If the answer is no, do not create a long-term memory.
+Output requirements:
 
-Prefer a few high-quality memories over a large collection of low-value memories.
+1. The top-level object MUST contain a single field named "memories".
+2. "memories" MUST be an array.
+3. Each array element MUST contain exactly two fields: "type" and "content".
+4. "type" MUST be one of the seven permitted values.
+5. "content" MUST be a non-empty string.
+6. Do not include Markdown, code fences, comments, explanations, or additional fields.
+7. Return the complete updated set of the supplied relevant memories, not merely memories extracted from the latest message. Keep supplied memories that remain valid; update or remove them only when the latest message clearly corrects, updates, or asks to forget them. Other database memories were not retrieved and must remain untouched.
+8. If no memories remain, return {"memories": []}.
+9. Ensure the output is valid JSON that can be parsed programmatically.
+10. Do not create embeddings; the application embeds each memory's content separately."""
 
-# OUTPUT FOR THIS APP
+MEMORY_TYPES = {
+    "project_fact", "technical_decision", "business_rule", "user_preference",
+    "lesson_learned", "ongoing_goal", "project_milestone",
+}
 
-Use the existing memory and latest user message to return the complete updated memory, applying additions, corrections, and forget requests. Keep distinct memories concise, with one bullet per memory. Do not impose a maximum number of bullets or words. Return only the updated memory, with no explanation or code fences. If no memories remain, return exactly NONE."""
+
+def parse_memories(raw):
+    """Validate the summariser's JSON before changing the saved memory set."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    result = json.loads(text)
+    if not isinstance(result, dict) or not isinstance(result.get("memories"), list):
+        raise ValueError('Expected a JSON object with a "memories" array.')
+
+    for item in result["memories"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"type", "content"}
+            or item["type"] not in MEMORY_TYPES
+            or not isinstance(item["content"], str)
+            or not item["content"].strip()
+        ):
+            raise ValueError("Each memory needs a permitted type and non-empty content.")
+        item["content"] = item["content"].strip()
+    return result["memories"]
 
 
 def new_session():
@@ -150,7 +240,7 @@ def list_sessions():
     return paths
 
 
-def chat(path, data, model, summarizer, summarizer_only):
+def chat(path, data, model, summarizer, summarizer_only, memory_store):
     print(f"\nSession {path.stem}. Type /back to return to the menu.\n")
     while True:
         prompt = input("You: ").strip()
@@ -159,7 +249,8 @@ def chat(path, data, model, summarizer, summarizer_only):
         if not prompt:
             continue
 
-        memory = MEMORY_FILE.read_text(encoding="utf-8").strip() if MEMORY_FILE.exists() else ""
+        memories = memory_store.relevant_memories(prompt, limit=MEMORY_LIMIT)
+        memory = "\n".join(f"- [{item['type']}] {item['content']}" for item in memories)
         if not summarizer_only:
             system_prompt = SYSTEM_PROMPT
             if memory:
@@ -186,17 +277,28 @@ def chat(path, data, model, summarizer, summarizer_only):
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
         try:
+            existing_memory = json.dumps(
+                [{"type": item["type"], "content": item["content"]} for item in memories],
+                ensure_ascii=False,
+                indent=2,
+            )
+            summary_input = (
+                f"RELEVANT EXISTING MEMORIES (top {MEMORY_LIMIT}):\n{existing_memory}"
+            )
+            summary_input += f"\n\nLATEST USER MESSAGE:\n{prompt}"
             summary = summarizer.invoke([
                 SystemMessage(content=SUMMARIZER_PROMPT),
-                HumanMessage(content=f"EXISTING MEMORY:\n{memory or 'NONE'}\n\nLATEST USER MESSAGE:\n{prompt}"),
+                HumanMessage(content=summary_input),
             ]).content.strip()
-            if summary == "NONE":
-                MEMORY_FILE.unlink(missing_ok=True)
-            elif summary:
-                MEMORY_FILE.write_text(summary + "\n", encoding="utf-8")
-            print(f"Summariser: {summary or 'No output'}\n")
+            print(f"Summariser: {summary or 'No output'}")
+            updated_memories = parse_memories(summary)
+            memory_store.replace_memories(
+                updated_memories,
+                path.stem,
+                retire_keys=[item["memory_key"] for item in memories],
+            )
         except Exception as error:
-            print(f"Summariser failed: {error}\n")
+            print(f"Summariser or memory save failed: {error}\n")
 
 
 def main():
@@ -204,8 +306,21 @@ def main():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise SystemExit("Set GROQ_API_KEY in the .env file before starting.")
+    voyage_key = os.getenv("VOYAGE_API_KEY")
+    if not voyage_key:
+        raise SystemExit("Set VOYAGE_API_KEY in the .env file before starting.")
 
     SESSIONS_DIR.mkdir(exist_ok=True)
+    ttl_days = int(os.getenv("MEMORY_TTL_DAYS", "365"))
+    if ttl_days < 1:
+        raise SystemExit("MEMORY_TTL_DAYS must be at least 1.")
+    memory_store = MemoryStore(
+        os.getenv("MONGODB_URI", "mongodb://localhost:27017"),
+        os.getenv("MONGODB_DATABASE", "agentic_memory"),
+        voyage_key,
+        os.getenv("VOYAGE_MODEL", "voyage-4-lite"),
+        ttl_days,
+    )
     summarizer_only = os.getenv("SUMMARIZER_ONLY", "false").lower() in {"1", "true", "yes"}
     model = None if summarizer_only else ChatGroq(
         model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
@@ -228,7 +343,7 @@ def main():
 
         if choice == "1":
             path, data = new_session()
-            chat(path, data, model, summarizer, summarizer_only)
+            chat(path, data, model, summarizer, summarizer_only, memory_store)
         elif choice == "2":
             paths = list_sessions()
             if paths:
@@ -236,7 +351,7 @@ def main():
                 if selection.isdigit() and 1 <= int(selection) <= len(paths):
                     path = paths[int(selection) - 1]
                     data = json.loads(path.read_text(encoding="utf-8"))
-                    chat(path, data, model, summarizer, summarizer_only)
+                    chat(path, data, model, summarizer, summarizer_only, memory_store)
         elif choice == "3":
             break
         else:
