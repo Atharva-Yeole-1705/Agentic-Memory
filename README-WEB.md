@@ -52,4 +52,31 @@ Open the local URL printed by Vite (normally `http://localhost:5173`). The backe
 
 `sessions` documents contain session-scoped messages. `memories` documents contain `owner_id`, `workspace_id`, `memory_type`, `content`, `source`, `created_at`, `updated_at`, and `expires_at`. TTL removes records after their expiry time.
 
-The current retriever is deterministic lexical relevance plus recency ranking. For semantic recall, replace `relevant_memories` in `backend/services.py` with an Atlas `$vectorSearch` stage after choosing an embedding provider and creating its vector index.
+## Groq rate-limit protection
+
+The app caps a normal assistant answer at 500 completion tokens and the memory extractor at 180. It also trims overlong chat context and maintains a conservative 7,000-token rolling one-minute reservation across both calls, leaving headroom under an 8K TPM organization limit. Adjust `GROQ_*` controls in `.env` only if your account limit changes.
+
+## Enable semantic memory with Atlas Vector Search
+
+The app uses Voyage `voyage-3.5-lite` embeddings at 1024 dimensions and searches `memories.embedding` with MongoDB's `$vectorSearch` aggregation stage. Add this to `.env`:
+
+```env
+VOYAGE_API_KEY=your_voyage_api_key
+VOYAGE_EMBEDDING_MODEL=voyage-3.5-lite
+VOYAGE_EMBEDDING_DIMENSIONS=1024
+MONGODB_VECTOR_INDEX=memory_vector_index
+```
+
+Your Atlas deployment must support Atlas Search/Vector Search. Create the vector index on database `agentic_memory`, collection `memories`, using [backend/vector_index.json](backend/vector_index.json), or run:
+
+```powershell
+python -m backend.create_vector_index
+```
+
+Wait until Atlas reports the index as **READY**, then add embeddings to any pre-existing memories:
+
+```powershell
+python -m backend.backfill_embeddings
+```
+
+New and edited memories receive an embedding. For each user message, the backend embeds the query and runs `$vectorSearch`, pre-filtered by owner, workspace, and retrieval deadline. It gives the top semantic matches to Groq and the frontend highlights the memories that were retrieved.
